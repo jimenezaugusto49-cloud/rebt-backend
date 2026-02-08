@@ -1,1 +1,4 @@
-Fix requirements.txt
+Flask
+flask-cors
+python-dotenv
+openai
