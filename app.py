@@ -1,6 +1,10 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 import os
 import json
 import tempfile
+from services.mtd_canarias_generator import generar_mtd_canarias_docx
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from openai import OpenAI
@@ -9,6 +13,8 @@ from services.calculos import (
     extraer_parametros_caida
 )
 from services.pdf_generator import generar_pdf_informe
+from services.mtd_logic import calcular_mtd
+from services.mtd_pdf_generator import generar_pdf_mtd
 
 # ─────────────────────────────────────────
 # 1. Verificación temprana de API KEY
@@ -22,6 +28,12 @@ if not API_KEY:
 # ─────────────────────────────────────────
 app = Flask(__name__)
 CORS(app)
+
+# ── NUEVO ──────────────────────────
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok"}), 200
+# ───────────────────────────────────
 
 # ─────────────────────────────────────────
 # 3. Cliente OpenAI (una sola vez)
@@ -238,5 +250,145 @@ def generate_report_pdf():
 # ─────────────────────────────────────────
 # 8. Arranque local (Render ignora esto)
 # ─────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# AÑADIR en los imports de app.py (junto a los otros imports):
+# ─────────────────────────────────────────────────────────────
+#
+# from services.mtd_logic import calcular_mtd
+# from services.mtd_pdf_generator import generar_pdf_mtd
+#
+# ─────────────────────────────────────────────────────────────
+# AÑADIR este endpoint al final de app.py, antes del bloque
+# if __name__ == "__main__":
+# ─────────────────────────────────────────────────────────────
+
+@app.route("/generate-mtd", methods=["POST"])
+def generate_mtd():
+    tmp_path = None
+    try:
+        raw = request.get_data(as_text=True)
+        if not raw:
+            return jsonify({"error": "Empty body"}), 400
+
+        datos = json.loads(raw)
+
+        # Validación mínima de campos obligatorios
+        campos_obligatorios = [
+            "titular", "dni", "direccion", "municipio", "provincia",
+            "superficie", "habitaciones", "banos",
+            "instalador_nombre", "instalador_nie", "instalador_num"
+        ]
+        faltantes = [c for c in campos_obligatorios if not datos.get(c)]
+        if faltantes:
+            return jsonify({
+                "error": f"Faltan campos obligatorios: {', '.join(faltantes)}"
+            }), 400
+
+        # Cálculo automático completo
+        mtd = calcular_mtd(datos)
+
+        # Generación del PDF
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+        tmp_path = tmp.name
+        tmp.close()
+
+        generar_pdf_mtd(mtd, tmp_path)
+
+        return send_file(
+            tmp_path,
+            as_attachment=True,
+            download_name="MTD_instalacion_electrica.pdf",
+            mimetype="application/pdf"
+        )
+
+    except Exception as e:
+        print("ERROR /generate-mtd:", e)
+        return jsonify({"error": "Error generando la MTD"}), 500
+
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+# ─────────────────────────────────────────────────────────────
+# AÑADIR en los imports de app.py:
+# from services.mtd_canarias_generator import generar_mtd_canarias_docx
+#
+# AÑADIR este endpoint antes del bloque if __name__ == "__main__":
+# ─────────────────────────────────────────────────────────────
+
+@app.route("/generate-mtd-canarias", methods=["POST"])
+def generate_mtd_canarias():
+    tmp_path = None
+    try:
+        raw = request.get_data(as_text=True)
+        if not raw:
+            return jsonify({"error": "Empty body"}), 400
+
+        datos = json.loads(raw)
+
+        # Validación mínima
+        campos_obligatorios = [
+            "titular", "dni", "direccion", "municipio",
+            "superficie", "instalador_nombre", "instalador_num",
+            "instalador_domicilio", "instalador_localidad",
+            "instalador_cp", "instalador_telefono"
+        ]
+        faltantes = [c for c in campos_obligatorios if not datos.get(c)]
+        if faltantes:
+            return jsonify({
+                "error": f"Faltan campos: {', '.join(faltantes)}"
+            }), 400
+
+        # Cálculo automático completo
+        from services.mtd_logic import calcular_mtd
+        mtd = calcular_mtd(datos)
+
+        # Añadir campos extra que necesita el generador
+        mtd["numero_direccion"]    = datos.get("numero_direccion", "")
+        mtd["portal_planta"]       = datos.get("portal_planta", "---")
+        mtd["cp_instalacion"]      = datos.get("cp_instalacion",
+                                        datos.get("instalador_cp", ""))
+        mtd["uso"]                 = datos.get("uso", "VIVIENDA UNIFAMILIAR")
+        mtd["num_instalacion"]     = datos.get("num_instalacion", "")
+        mtd["instalador_domicilio"]    = datos.get("instalador_domicilio", "")
+        mtd["instalador_num_domicilio"]= datos.get("instalador_num_domicilio", "")
+        mtd["instalador_localidad"]    = datos.get("instalador_localidad", "")
+        mtd["instalador_cp"]           = datos.get("instalador_cp", "")
+        mtd["instalador_telefono"]     = datos.get("instalador_telefono", "")
+
+        # Generar docx
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".docx")
+        tmp_path = tmp.name
+        tmp.close()
+
+        from services.mtd_canarias_generator import generar_mtd_canarias_docx
+        generar_mtd_canarias_docx(mtd, tmp_path)
+
+        titular_safe = mtd["titular"].replace(" ", "_")[:20]
+        return send_file(
+            tmp_path,
+            as_attachment=True,
+            download_name=f"MTD_Canarias_{titular_safe}.docx",
+            mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+
+    except FileNotFoundError as e:
+        print("ERROR plantilla:", e)
+        return jsonify({"error": "Plantilla no encontrada en el servidor"}), 500
+
+    except Exception as e:
+        print("ERROR /generate-mtd-canarias:", e)
+        return jsonify({"error": "Error generando MTD Canarias"}), 500
+
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
