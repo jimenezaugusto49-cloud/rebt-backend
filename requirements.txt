@@ -6,3 +6,4 @@ pdfrw
 pypdf
 python-docx
 docxtpl
+reportlab
